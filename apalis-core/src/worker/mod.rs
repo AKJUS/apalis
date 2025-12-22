@@ -584,7 +584,7 @@ where
     type Future = S::Future;
 
     fn poll_ready(&mut self, cx: &mut std::task::Context<'_>) -> Poll<Result<(), Self::Error>> {
-        if self.ctx.is_shutting_down() {
+        if self.ctx.is_shutting_down() || self.ctx.is_paused() {
             self.ctx.is_ready.store(false, Ordering::SeqCst);
             return Poll::Pending;
         }
@@ -639,7 +639,7 @@ mod tests {
     async fn basic_worker_run() {
         let mut json_store = JsonStorage::new_temp().unwrap();
         for i in 0..ITEMS {
-            json_store.push(i.into()).await.unwrap();
+            json_store.push(i).await.unwrap();
         }
 
         #[derive(Clone, Debug, Default)]
