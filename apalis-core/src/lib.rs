@@ -168,15 +168,14 @@
 //! ```rust
 //! # use apalis_core::monitor::Monitor;
 //! # use apalis_core::worker::builder::WorkerBuilder;
-//! # use apalis_core::backend::json::JsonStorage;
 //! # use apalis_core::task::Task;
-//! # use apalis_core::backend::TaskSink;
+//! # use apalis_core::backend::{TaskSink, dequeue};
 //! # use tower::service_fn;
 //! # use std::time::Duration;
 //! # use apalis_core::worker::context::WorkerContext;
 //! #[tokio::main]
 //! async fn main() {
-//!     let mut storage = JsonStorage::new_temp().unwrap();
+//!     let mut storage = dequeue::backend::<u32>(Duration::from_secs(1));
 //!     storage.push(1u32).await.unwrap();
 //!
 //!     let monitor = Monitor::new()
@@ -303,7 +302,7 @@
 //!
 //! # Observability
 //! You can track tasks using [apalis-board](https://github.com/apalis-dev/apalis-board).
-//! ![Task](https://github.com/apalis-dev/apalis-board/raw/master/screenshots/task.png)
+//! ![Task](https://github.com/apalis-dev/apalis-board/raw/main/screenshots/task.png)
 //!
 //! [`Backend`]: crate::backend::Backend
 //! [`TaskFn`]: crate::task_fn::TaskFn

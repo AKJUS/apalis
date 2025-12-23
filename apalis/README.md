@@ -32,7 +32,7 @@
 
 ## Features
 
-- **Simple and predictable task handling** - [Task handlers](https://docs.rs/apalis-core/1.0.0-beta.2/apalis_core/task_fn/guide/index.html) are just async functions with a macro-free API
+- **Simple and predictable task handling** - [Task handlers](https://docs.rs/apalis-core/1.0.0-rc.1/apalis_core/task_fn/guide/index.html) are just async functions with a macro-free API
 - **Robust task execution** - Built-in support for retries, timeouts, and error handling
 - **Multiple storage backends** - Support for Redis, PostgreSQL, SQLite, and in-memory storage
 - **Advanced task management** - Task prioritization, scheduling, metadata, and result tracking
@@ -56,7 +56,7 @@
 | `apalis-core`      | <a href="https://docs.rs/apalis-core"><img src="https://img.shields.io/crates/v/apalis-core?style=flat-square"></a>           |                                                                                                                                                                                     |
 | `apalis-workflow`  | <a href="https://docs.rs/apalis-workflow"><img src="https://img.shields.io/crates/v/apalis-workflow?style=flat-square"></a>   |                                                                                                                                                                                     |
 | `apalis-board`     | <a href="https://docs.rs/apalis-board"><img src="https://img.shields.io/crates/v/apalis-board?style=flat-square"></a>         |                                                                                                                                                                                     |
-| `apalis-board-api` | <a href="https://docs.rs/apalis-board-api"><img src="https://img.shields.io/crates/v/apalis-board-api?style=flat-square"></a> | <a href="https://github.com/apalis-dev/apalis-board/tree/master/examples/axum-email-service"><img src="https://img.shields.io/badge/axum-blue?style=flat-square&logo=github"/></a> <a href="https://github.com/apalis-dev/apalis-board/tree/master/examples/actix-ntfy-service"><img src="https://img.shields.io/badge/actix-red?style=flat-square&logo=github"/></a> |
+| `apalis-board-api` | <a href="https://docs.rs/apalis-board-api"><img src="https://img.shields.io/crates/v/apalis-board-api?style=flat-square"></a> | <a href="https://github.com/apalis-dev/apalis-board/tree/main/examples/axum-email-service"><img src="https://img.shields.io/badge/axum-blue?style=flat-square&logo=github"/></a> <a href="https://github.com/apalis-dev/apalis-board/tree/main/examples/actix-ntfy-service"><img src="https://img.shields.io/badge/actix-red?style=flat-square&logo=github"/></a> |
 
 ## Getting Started
 
@@ -64,7 +64,7 @@ To get started, just add to Cargo.toml
 
 ```toml
 [dependencies]
-apalis = { version = "1.0.0-beta.2" }
+apalis = { version = "1.0.0-rc.1" }
 # apalis-redis = { version = "1.0.0-alpha.1" } # Use redis/sqlite/postgres etc
 ```
 
@@ -114,7 +114,7 @@ async fn main() {
 use apalis::prelude::*;
 use apalis_workflow::*;
 use std::time::Duration;
-use apalis_core::backend::json::JsonStorage;
+use apalis_file_storage::JsonStorage;;
 
 #[tokio::main]
 async fn main() {
@@ -143,18 +143,6 @@ async fn main() {
 
 For more functionality like `fold`, `filter_map` and other combinators checkout the [docs](https://docs.rs/apalis-workflow)
 
-## Feature flags
-
-- _full_ - All the available features
-- _tracing_ (enabled by default) — Support Tracing 👀
-- _sentry_ — Support for Sentry exception and performance monitoring
-- _prometheus_ — Support Prometheus metrics
-- _retry_ — Support direct retrying tasks
-- _timeout_ — Support timeouts on tasks
-- _limit_ — Support for concurrency and rate-limiting
-- _filter_ — Support filtering tasks based on a predicate
-- _catch-panic_ - Catch panics that occur during execution
-
 ## How apalis works
 
 Here is a basic example of how the core parts integrate
@@ -177,9 +165,9 @@ sequenceDiagram
 
 ## Observability
 
-With the [web UI](https://github.com/apalis-dev/apalis-board), you can manage your jobs through a simple interface. Check out this [working example](https://github.com/apalis-dev/apalis-board/blob/master/examples/axum-email-service) to see how it works.
+With the [web UI](https://github.com/apalis-dev/apalis-board), you can manage your jobs through a simple interface. Check out this [working example](https://github.com/apalis-dev/apalis-board/blob/main/examples/axum-email-service) to see how it works.
 
-![Workers Screenshot](https://github.com/apalis-dev/apalis-board/raw/master/screenshots/workers.png)
+![Workers Screenshot](https://github.com/apalis-dev/apalis-board/raw/main/screenshots/workers.png)
 
 ## Integrations
 

@@ -1,6 +1,12 @@
-use std::{collections::HashMap, marker::PhantomData, sync::Mutex};
+use std::{
+    collections::{HashMap, VecDeque},
+    fmt::{self, Debug},
+    marker::PhantomData,
+    sync::Mutex,
+};
 
 use apalis_core::{
+    backend::{BackendExt, codec::Codec},
     error::BoxDynError,
     task::Task,
     task_fn::{TaskFn, task_fn},
@@ -11,139 +17,170 @@ use petgraph::{
     dot::Config,
     graph::{DiGraph, EdgeIndex, NodeIndex},
 };
-use tower::{Service, ServiceBuilder};
+/// DAG executor implementations
+pub mod executor;
+/// DAG service implementations
+pub mod service;
 
-use crate::{BoxedService, SteppedService};
+/// DAG error definitions
+pub mod error;
+/// DAG node implementations
+pub mod node;
+
+/// DAG context implementations
+pub mod context;
+
+/// DAG response implementations
+pub mod response;
+
+use serde::{Deserialize, Serialize};
+use tower::{Service, util::BoxCloneSyncService};
+
+use crate::{
+    DagService,
+    dag::{error::DagFlowError, executor::DagExecutor, node::NodeService},
+};
+
+pub use context::DagFlowContext;
+pub use service::RootDagService;
 
 /// Directed Acyclic Graph (DAG) workflow builder
 #[derive(Debug)]
-pub struct DagFlow<Input = (), Output = ()> {
-    graph: Mutex<DiGraph<SteppedService<(), (), ()>, ()>>,
+pub struct DagFlow<B>
+where
+    B: BackendExt,
+{
+    name: String,
+    graph: Mutex<DiGraph<DagService<B::Compact, B::Context, B::IdType>, ()>>,
     node_mapping: Mutex<HashMap<String, NodeIndex>>,
-    _marker: PhantomData<(Input, Output)>,
 }
 
-impl Default for DagFlow {
-    fn default() -> Self {
-        Self::new()
+impl<B> fmt::Display for DagFlow<B>
+where
+    B: BackendExt,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "DAG name: {}", self.name)?;
+        writeln!(f, "Dot format:")?;
+        f.write_str(&self.to_dot())
     }
 }
 
-impl DagFlow {
+impl<B> DagFlow<B>
+where
+    B: BackendExt,
+{
     /// Create a new DAG workflow builder
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(name: &str) -> Self {
         Self {
+            name: name.to_owned(),
             graph: Mutex::new(DiGraph::new()),
             node_mapping: Mutex::new(HashMap::new()),
-            _marker: PhantomData,
         }
     }
 
     /// Add a node to the DAG
     #[must_use]
-    #[allow(clippy::todo)]
-    pub fn add_node<S, Input>(&self, name: &str, service: S) -> NodeBuilder<'_, Input, S::Response>
+    pub fn add_node<S, Input, CodecError>(
+        &self,
+        name: &str,
+        service: S,
+    ) -> NodeBuilder<'_, Input, S::Response, B>
     where
-        S: Service<Task<Input, (), ()>> + Send + 'static,
+        S: Service<Task<Input, B::Context, B::IdType>> + Send + 'static + Sync + Clone,
         S::Future: Send + 'static,
+        B::Codec: Codec<Input, Compact = B::Compact, Error = CodecError>
+            + Codec<S::Response, Compact = B::Compact, Error = CodecError>
+            + 'static,
+        CodecError: Into<BoxDynError> + Send + 'static,
+        S::Error: Into<BoxDynError>,
+        B: Send + Sync + 'static,
+        Input: Send + Sync + 'static,
     {
-        let svc = ServiceBuilder::new()
-            .map_request(|r: Task<(), (), ()>| todo!())
-            .map_response(|r: S::Response| todo!())
-            .map_err(|_e: S::Error| {
-                let boxed: BoxDynError = todo!();
-                boxed
-            })
-            .service(service);
-        let node = self.graph.lock().unwrap().add_node(BoxedService::new(svc));
+        let svc: NodeService<S, B, Input> = NodeService::new(service);
+        let node = self
+            .graph
+            .lock()
+            .expect("Failed to lock graph mutex")
+            .add_node(BoxCloneSyncService::new(svc));
         self.node_mapping
             .lock()
-            .unwrap()
+            .expect("Failed to lock node_mapping mutex")
             .insert(name.to_owned(), node);
         NodeBuilder {
             id: node,
             dag: self,
-            io: PhantomData,
+            _phantom: PhantomData,
         }
     }
 
     /// Add a task function node to the DAG
-    pub fn node<F, Input, O, FnArgs>(&self, node: F) -> NodeBuilder<'_, Input, O>
+    pub fn node<F, Input, O, FnArgs, Err, CodecError>(&self, node: F) -> NodeBuilder<'_, Input, O, B>
     where
-        TaskFn<F, Input, (), FnArgs>: Service<Task<Input, (), ()>, Response = O>,
-        F: Send + 'static,
-        Input: Send + 'static,
-        FnArgs: Send + 'static,
-        <TaskFn<F, Input, (), FnArgs> as Service<Task<Input, (), ()>>>::Future: Send + 'static,
+        TaskFn<F, Input, B::Context, FnArgs>: Service<Task<Input, B::Context, B::IdType>, Response = O, Error = Err> + Clone,
+        F: Send + 'static + Sync,
+        Input: Send + 'static + Sync,
+        FnArgs: Send + 'static + Sync,
+        B::Context: Send + Sync + 'static,
+        <TaskFn<F, Input, B::Context, FnArgs> as Service<Task<Input, B::Context, B::IdType>>>::Future:
+            Send + 'static,
+        B::Codec: Codec<Input, Compact = B::Compact, Error = CodecError> + 'static,
+        B::Codec: Codec<O, Compact = B::Compact, Error = CodecError> + 'static,
+        CodecError: Into<BoxDynError> + Send + 'static,
+        Err: Into<BoxDynError>,
+        B: Send + Sync + 'static,
+        Input: Send + Sync + 'static,
+
     {
         self.add_node(std::any::type_name::<F>(), task_fn(node))
     }
 
     /// Add a routing node to the DAG
-    pub fn route<F, Input, O, FnArgs>(&self, router: F) -> NodeBuilder<'_, Input, O>
+    pub fn route<F, Input, O, FnArgs, Err, CodecError>(
+        &self,
+        router: F,
+    ) -> NodeBuilder<'_, Input, O, B>
     where
-        TaskFn<F, Input, (), FnArgs>: Service<Task<Input, (), ()>, Response = O>,
-        F: Send + 'static,
-        Input: Send + 'static,
-        FnArgs: Send + 'static,
-        <TaskFn<F, Input, (), FnArgs> as Service<Task<Input, (), ()>>>::Future: Send + 'static,
+        TaskFn<F, Input, B::Context, FnArgs>: Service<Task<Input, B::Context, B::IdType>, Response = O, Error = Err> + Clone,
+        F: Send + 'static + Sync,
+        Input: Send + 'static + Sync,
+        FnArgs: Send + 'static + Sync,
+        <TaskFn<F, Input, B::Context, FnArgs> as Service<Task<Input, B::Context, B::IdType>>>::Future:
+            Send + 'static,
         O: Into<NodeIndex>,
+        B::Context: Send + Sync + 'static,
+        B::Codec: Codec<Input, Compact = B::Compact, Error = CodecError> + 'static,
+        B::Codec: Codec<O, Compact = B::Compact, Error = CodecError> + 'static,
+        CodecError: Into<BoxDynError> + Send + 'static,
+        Err: Into<BoxDynError>,
+        B: Send + Sync + 'static,
+        Input: Send + Sync + 'static,
+
     {
-        self.add_node::<TaskFn<F, Input, (), FnArgs>, Input>(
+        self.add_node::<TaskFn<F, Input, B::Context, FnArgs>, Input, CodecError>(
             std::any::type_name::<F>(),
             task_fn(router),
         )
     }
 
-    /// Build the DAG executor
-    pub fn build(self) -> Result<DagExecutor, String> {
+    /// Validate the DAG for cycles
+    pub fn validate(&self) -> Result<(), DagFlowError> {
         // Validate DAG (check for cycles)
-        let sorted =
-            toposort(&*self.graph.lock().unwrap(), None).map_err(|_| "DAG contains cycles")?;
-
-        fn find_edge_nodes<N, E>(graph: &DiGraph<N, E>, direction: Direction) -> Vec<NodeIndex> {
-            graph
-                .node_indices()
-                .filter(|&n| graph.neighbors_directed(n, direction).count() == 0)
-                .collect()
-        }
-
-        let graph = self.graph.into_inner().unwrap();
-
-        Ok(DagExecutor {
-            start_nodes: find_edge_nodes(&graph, Direction::Incoming),
-            end_nodes: find_edge_nodes(&graph, Direction::Outgoing),
-            graph,
-            node_mapping: self.node_mapping.into_inner().unwrap(),
-            topological_order: sorted,
-        })
-    }
-}
-
-/// Executor for DAG workflows
-#[derive(Debug)]
-pub struct DagExecutor<Ctx = (), IdType = ()> {
-    graph: DiGraph<SteppedService<(), Ctx, IdType>, ()>,
-    node_mapping: HashMap<String, NodeIndex>,
-    topological_order: Vec<NodeIndex>,
-    start_nodes: Vec<NodeIndex>,
-    end_nodes: Vec<NodeIndex>,
-}
-
-impl DagExecutor {
-    /// Get a node by name
-    pub fn get_node_by_name_mut(&mut self, name: &str) -> Option<&mut SteppedService<(), (), ()>> {
-        self.node_mapping
-            .get(name)
-            .and_then(|&idx| self.graph.node_weight_mut(idx))
+        toposort(
+            &*self.graph.lock().expect("Failed to lock graph mutex"),
+            None,
+        )
+        .map_err(DagFlowError::CyclicDAG)?;
+        Ok(())
     }
 
     /// Export the DAG to DOT format
-    #[must_use]
     pub fn to_dot(&self) -> String {
         let names = self
             .node_mapping
+            .lock()
+            .expect("could not lock nodes")
             .iter()
             .map(|(name, &idx)| (idx, name.clone()))
             .collect::<HashMap<_, _>>();
@@ -153,25 +190,89 @@ impl DagExecutor {
                 names.get(&index).cloned().unwrap_or_default()
             )
         };
+        let graph = self.graph.lock().expect("could not lock graph");
         let dot = petgraph::dot::Dot::with_attr_getters(
-            &self.graph,
+            &*graph,
             &[Config::NodeNoLabel, Config::EdgeNoLabel],
             &|_, _| String::new(),
             &get_node_attributes,
         );
         format!("{dot:?}")
     }
+
+    /// Build the DAG executor
+    pub(crate) fn build(self) -> Result<DagExecutor<B>, DagFlowError> {
+        // Validate DAG (check for cycles)
+        let sorted = toposort(
+            &*self.graph.lock().expect("Failed to lock graph mutex"),
+            None,
+        )
+        .map_err(DagFlowError::CyclicDAG)?;
+
+        fn find_edge_nodes<N, E>(graph: &DiGraph<N, E>, direction: Direction) -> Vec<NodeIndex> {
+            graph
+                .node_indices()
+                .filter(|&n| graph.neighbors_directed(n, direction).count() == 0)
+                .collect()
+        }
+
+        let graph = self
+            .graph
+            .into_inner()
+            .expect("Failed to unlock graph mutex");
+
+        Ok(DagExecutor {
+            start_nodes: find_edge_nodes(&graph, Direction::Incoming),
+            end_nodes: find_edge_nodes(&graph, Direction::Outgoing),
+            graph,
+            node_mapping: self
+                .node_mapping
+                .into_inner()
+                .expect("Failed to unlock node_mapping mutex"),
+            topological_order: sorted,
+            not_ready: VecDeque::new(),
+        })
+    }
 }
 
 /// Builder for a node in the DAG
-#[derive(Clone, Debug)]
-pub struct NodeBuilder<'a, Input, Output = ()> {
+pub struct NodeBuilder<'a, Input, Output, B>
+where
+    B: BackendExt,
+{
     pub(crate) id: NodeIndex,
-    pub(crate) dag: &'a DagFlow,
-    pub(crate) io: PhantomData<(Input, Output)>,
+    pub(crate) dag: &'a DagFlow<B>,
+    _phantom: PhantomData<(Input, Output)>,
 }
 
-impl<Input, Output> NodeBuilder<'_, Input, Output> {
+impl<'a, Input, Output, B> std::fmt::Debug for NodeBuilder<'a, Input, Output, B>
+where
+    B: BackendExt,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NodeBuilder")
+            .field("id", &self.id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a, Input, Output, B> Clone for NodeBuilder<'a, Input, Output, B>
+where
+    B: BackendExt,
+{
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            dag: self.dag,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<Input, Output, B> NodeBuilder<'_, Input, Output, B>
+where
+    B: BackendExt,
+{
     /// Specify dependencies for this node
     #[allow(clippy::needless_pass_by_value)]
     pub fn depends_on<D>(self, deps: D) -> NodeHandle<Input, Output>
@@ -179,7 +280,7 @@ impl<Input, Output> NodeBuilder<'_, Input, Output> {
         D: DepsCheck<Input>,
     {
         let mut edges = Vec::new();
-        for dep in deps.to_node_ids() {
+        for dep in deps.to_node_indices() {
             edges.push(self.dag.graph.lock().unwrap().add_edge(dep, self.id, ()));
         }
         NodeHandle {
@@ -192,61 +293,83 @@ impl<Input, Output> NodeBuilder<'_, Input, Output> {
 
 /// Handle for a node in the DAG
 #[derive(Clone, Debug)]
-pub struct NodeHandle<Input, Output = ()> {
+pub struct NodeHandle<Input, Output> {
     pub(crate) id: NodeIndex,
     pub(crate) edges: Vec<EdgeIndex>,
     pub(crate) _phantom: PhantomData<(Input, Output)>,
 }
 
+impl<Input, Output> NodeHandle<Input, Output> {
+    /// Get the node ID
+    #[must_use]
+    pub fn id(&self) -> NodeIndex {
+        self.id
+    }
+
+    /// Get the edge IDs
+    #[must_use]
+    pub fn edges(&self) -> &[EdgeIndex] {
+        &self.edges
+    }
+}
+
 /// Trait for converting dependencies into node IDs
 pub trait DepsCheck<Input> {
-    /// Convert dependencies to node IDs
-    fn to_node_ids(&self) -> Vec<NodeIndex>;
+    /// Convert dependencies to node indices
+    fn to_node_indices(&self) -> Vec<NodeIndex>;
 }
 
 impl DepsCheck<()> for () {
-    fn to_node_ids(&self) -> Vec<NodeIndex> {
+    fn to_node_indices(&self) -> Vec<NodeIndex> {
         Vec::new()
     }
 }
 
-impl<'a, Input, Output> DepsCheck<Output> for &NodeBuilder<'a, Input, Output> {
-    fn to_node_ids(&self) -> Vec<NodeIndex> {
+impl<'a, Input, Output, B> DepsCheck<Output> for &NodeBuilder<'a, Input, Output, B>
+where
+    B: BackendExt,
+{
+    fn to_node_indices(&self) -> Vec<NodeIndex> {
         vec![self.id]
     }
 }
 
 impl<Input, Output> DepsCheck<Output> for &NodeHandle<Input, Output> {
-    fn to_node_ids(&self) -> Vec<NodeIndex> {
+    fn to_node_indices(&self) -> Vec<NodeIndex> {
         vec![self.id]
     }
 }
 
 impl<Input, Output> DepsCheck<Output> for (&NodeHandle<Input, Output>,) {
-    fn to_node_ids(&self) -> Vec<NodeIndex> {
+    fn to_node_indices(&self) -> Vec<NodeIndex> {
         vec![self.0.id]
     }
 }
 
-impl<'a, Input, Output> DepsCheck<Output> for (&NodeBuilder<'a, Input, Output>,) {
-    fn to_node_ids(&self) -> Vec<NodeIndex> {
+impl<'a, Input, Output, B> DepsCheck<Output> for (&NodeBuilder<'a, Input, Output, B>,)
+where
+    B: BackendExt,
+{
+    fn to_node_indices(&self) -> Vec<NodeIndex> {
         vec![self.0.id]
     }
 }
 
 impl<Output, T: DepsCheck<Output>> DepsCheck<Vec<Output>> for Vec<T> {
-    fn to_node_ids(&self) -> Vec<NodeIndex> {
-        self.iter().flat_map(|item| item.to_node_ids()).collect()
+    fn to_node_indices(&self) -> Vec<NodeIndex> {
+        self.iter()
+            .flat_map(|item| item.to_node_indices())
+            .collect()
     }
 }
 
 macro_rules! impl_deps_check {
     ($( $len:literal => ( $( $in:ident $out:ident $idx:tt ),+ ) ),+ $(,)?) => {
         $(
-            impl<'a, $( $in, )+ $( $out, )+> DepsCheck<( $( $out, )+ )>
-                for ( $( &NodeBuilder<'a, $in, $out>, )+ )
+            impl<'a, $( $in, )+ $( $out, )+ B> DepsCheck<( $( $out, )+ )>
+                for ( $( &NodeBuilder<'a, $in, $out, B>, )+ ) where B: BackendExt
             {
-                fn to_node_ids(&self) -> Vec<NodeIndex> {
+                fn to_node_indices(&self) -> Vec<NodeIndex> {
                     vec![ $( self.$idx.id ),+ ]
                 }
             }
@@ -254,7 +377,7 @@ macro_rules! impl_deps_check {
             impl<$( $in, )+ $( $out, )+> DepsCheck<( $( $out, )+ )>
                 for ( $( &NodeHandle<$in, $out>, )+ )
             {
-                fn to_node_ids(&self) -> Vec<NodeIndex> {
+                fn to_node_indices(&self) -> Vec<NodeIndex> {
                     vec![ $( self.$idx.id ),+ ]
                 }
             }
@@ -273,32 +396,193 @@ impl_deps_check! {
     8 => (Input1 Output1 0, Input2 Output2 1, Input3 Output3 2, Input4 Output4 3, Input5 Output5 4, Input6 Output6 5, Input7 Output7 6, Input8 Output8 7),
 }
 
+/// State of the node in DAG execution
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum DagState {
+    /// Unknown state
+    Unknown,
+    /// State for a single node
+    SingleNode,
+    /// Fan-in state to gather inputs
+    FanIn,
+    /// Fan-out state to distribute inputs
+    FanOut,
+}
+
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::HashMap, marker::PhantomData, num::ParseIntError, ops::Range, time::Duration,
-    };
+    use std::num::ParseIntError;
 
     use apalis_core::{
-        backend::json::JsonStorage, error::BoxDynError, task::Task, task_fn::task_fn,
-        worker::context::WorkerContext,
+        error::BoxDynError,
+        task_fn::task_fn,
+        worker::{
+            builder::WorkerBuilder, context::WorkerContext, event::Event,
+            ext::event_listener::EventListenerExt,
+        },
     };
+    use apalis_file_storage::JsonStorage;
     use petgraph::graph::NodeIndex;
+    use serde::{Deserialize, Serialize};
     use serde_json::Value;
 
-    use crate::{step::Identity, workflow::Workflow};
+    use crate::WorkflowSink;
 
     use super::*;
 
-    #[test]
-    fn test_basic_workflow() {
-        let dag = DagFlow::new();
+    #[tokio::test]
+    async fn test_basic_workflow() {
+        let dag = DagFlow::new("sequential-workflow");
+        let start = dag.add_node("start", task_fn(|task: u32| async move { task as usize }));
+        let middle = dag
+            .add_node(
+                "middle",
+                task_fn(|task: usize| async move { task.to_string() }),
+            )
+            .depends_on(&start);
+
+        let _end = dag
+            .add_node(
+                "end",
+                task_fn(|task: String, worker: WorkerContext| async move {
+                    worker.stop().unwrap();
+                    task.parse::<usize>()
+                }),
+            )
+            .depends_on(&middle);
+
+        println!("DAG in DOT format:\n{}", dag.to_dot());
+
+        let mut backend = JsonStorage::new_temp().unwrap();
+
+        backend.push_start(Value::from(42)).await.unwrap();
+
+        let worker = WorkerBuilder::new("rango-tango")
+            .backend(backend)
+            .on_event(|ctx, ev| {
+                println!("On Event = {ev:?}");
+                if matches!(ev, Event::Error(_)) {
+                    ctx.stop().unwrap();
+                }
+            })
+            .build(dag);
+        worker.run().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_fan_out_workflow() {
+        let dag = DagFlow::new("fan-out-workflow");
+        let source = dag.add_node("source", task_fn(|task: u32| async move { task as usize }));
+        let plus_one = dag
+            .add_node("plus_one", task_fn(|task: usize| async move { task + 1 }))
+            .depends_on(&source);
+
+        let multiply = dag
+            .add_node("multiply", task_fn(|task: usize| async move { task * 2 }))
+            .depends_on(&source);
+        let squared = dag
+            .add_node("squared", task_fn(|task: usize| async move { task * task }))
+            .depends_on(&source);
+
+        let _collector = dag
+            .add_node(
+                "collector",
+                task_fn(|task: (usize, usize, usize), w: WorkerContext| async move {
+                    w.stop().unwrap();
+                    task.0 + task.1 + task.2
+                }),
+            )
+            .depends_on((&plus_one, &multiply, &squared));
+
+        println!("DAG in DOT format:\n{}", dag.to_dot());
+
+        let mut backend: JsonStorage<Value> = JsonStorage::new_temp().unwrap();
+
+        backend.push_start(Value::from(42)).await.unwrap();
+
+        let worker = WorkerBuilder::new("rango-tango")
+            .backend(backend)
+            .on_event(|ctx, ev| {
+                println!("On Event = {ev:?}");
+                if matches!(ev, Event::Error(_)) {
+                    ctx.stop().unwrap();
+                }
+            })
+            .build(dag);
+        worker.run().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_fan_in_workflow() {
+        let dag = DagFlow::new("fan-in-workflow");
+        let get_name = dag.add_node(
+            "get_name",
+            task_fn(|task: u32| async move { task as usize }),
+        );
+        let get_age = dag.add_node(
+            "get_age",
+            task_fn(|task: u32| async move { task.to_string() }),
+        );
+        let get_address = dag.add_node(
+            "get_address",
+            task_fn(|task: u32| async move { task as usize }),
+        );
+        let main_collector = dag
+            .add_node(
+                "main_collector",
+                task_fn(|task: (String, usize, usize)| async move {
+                    task.2 + task.1 + task.0.parse::<usize>().unwrap()
+                }),
+            )
+            .depends_on((&get_age, &get_name, &get_address));
+
+        let side_collector = dag
+            .add_node(
+                "side_collector",
+                task_fn(|task: Vec<usize>| async move { task.iter().sum::<usize>() }),
+            )
+            .depends_on(vec![&get_name, &get_address]);
+
+        let _final_node = dag
+            .add_node(
+                "final_node",
+                task_fn(|task: (usize, usize), w: WorkerContext| async move {
+                    w.stop().unwrap();
+                    task.0 + task.1
+                }),
+            )
+            .depends_on((&main_collector, &side_collector));
+
+        println!("DAG in DOT format:\n{}", dag.to_dot());
+
+        let mut backend: JsonStorage<Value> = JsonStorage::new_temp().unwrap();
+
+        backend
+            .push_start(Value::from(vec![42, 43, 44]))
+            .await
+            .unwrap();
+
+        let worker = WorkerBuilder::new("rango-tango")
+            .backend(backend)
+            .on_event(|ctx, ev| {
+                println!("On Event = {ev:?}");
+                if matches!(ev, Event::Error(_)) {
+                    ctx.stop().unwrap();
+                }
+            })
+            .build(dag);
+        worker.run().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_routed_workflow() {
+        let dag = DagFlow::new("routed-workflow");
 
         let entry1 = dag.add_node("entry1", task_fn(|task: u32| async move { task as usize }));
         let entry2 = dag.add_node("entry2", task_fn(|task: u32| async move { task as usize }));
         let entry3 = dag.add_node("entry3", task_fn(|task: u32| async move { task as usize }));
 
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
         enum EntryRoute {
             Entry1(NodeIndex),
             Entry2(NodeIndex),
@@ -316,7 +600,7 @@ mod tests {
         }
 
         impl DepsCheck<usize> for EntryRoute {
-            fn to_node_ids(&self) -> Vec<NodeIndex> {
+            fn to_node_indices(&self) -> Vec<NodeIndex> {
                 vec![(*self).into()]
             }
         }
@@ -326,7 +610,7 @@ mod tests {
         }
         let collector = dag.node(collect).depends_on((&entry1, &entry2, &entry3));
 
-        async fn vec_collect(task: Vec<usize>, worker: WorkerContext) -> usize {
+        async fn vec_collect(task: Vec<usize>, _wrk: WorkerContext) -> usize {
             task.iter().sum::<usize>()
         }
 
@@ -340,7 +624,12 @@ mod tests {
 
         let on_collect = dag.node(exit).depends_on((&collector, &vec_collector));
 
-        async fn check_approval(task: u32) -> Result<EntryRoute, BoxDynError> {
+        async fn check_approval(
+            task: u32,
+            worker: WorkerContext,
+        ) -> Result<EntryRoute, BoxDynError> {
+            println!("Approval check for task: {}", task);
+            worker.stop().unwrap();
             match task % 3 {
                 0 => Ok(EntryRoute::Entry1(NodeIndex::new(0))),
                 1 => Ok(EntryRoute::Entry2(NodeIndex::new(1))),
@@ -351,52 +640,24 @@ mod tests {
 
         dag.route(check_approval).depends_on(&on_collect);
 
-        let dag_executor = dag.build().unwrap();
-        assert_eq!(dag_executor.topological_order.len(), 7);
+        println!("DAG in DOT format:\n{}", dag.to_dot());
 
-        println!("Start nodes: {:?}", dag_executor.start_nodes);
-        println!("End nodes: {:?}", dag_executor.end_nodes);
+        let mut backend = JsonStorage::new_temp().unwrap();
 
-        println!(
-            "DAG Topological Order: {:?}",
-            dag_executor.topological_order
-        );
+        backend
+            .push_start(Value::from(vec![17, 18, 19]))
+            .await
+            .unwrap();
 
-        println!("DAG in DOT format:\n{}", dag_executor.to_dot());
-
-        // let inner_basic: Workflow<u32, usize, JsonStorage<Value>, _> = Workflow::new("basic")
-        //     .and_then(async |input: u32| (input + 1) as usize)
-        //     .and_then(async |input: usize| input.to_string())
-        //     .and_then(async |input: String| input.parse::<usize>());
-
-        // let workflow = Workflow::new("example_workflow")
-        //     .and_then(async |input: u32| Ok::<Range<u32>, BoxDynError>(input..100))
-        //     .filter_map(
-        //         async |input: u32| {
-        //             if input > 50 { Some(input) } else { None }
-        //         },
-        //     )
-        //     .and_then(async |items: Vec<u32>| Ok::<_, BoxDynError>(items))
-        //     .fold(0, async |(acc, item): (u32, u32)| {
-        //         Ok::<_, BoxDynError>(item + acc)
-        //     })
-        //     // .delay_for(Duration::from_secs(2))
-        //     // .delay_with(|_| Duration::from_secs(1))
-        //     // .and_then(async |items: Range<u32>| Ok::<_, BoxDynError>(items.sum::<u32>()))
-        //     // .repeat_until(async |i: u32| {
-        //     //     if i < 20 {
-        //     //         Ok::<_, BoxDynError>(Some(i))
-        //     //     } else {
-        //     //         Ok(None)
-        //     //     }
-        //     // })
-        //     // .chain(inner_basic)
-        //     // .chain(
-        //     //     Workflow::new("sub_workflow")
-        //     //         .and_then(async |input: usize| Ok::<_, BoxDynError>(input as u32 * 2))
-        //     //         .and_then(async |input: u32| Ok::<_, BoxDynError>(input + 10)),
-        //     // )
-        //     // .chain(dag_executor)
-        //     .build();
+        let worker = WorkerBuilder::new("rango-tango")
+            .backend(backend)
+            .on_event(|ctx, ev| {
+                println!("On Event = {ev:?}");
+                if matches!(ev, Event::Error(_)) {
+                    ctx.stop().unwrap();
+                }
+            })
+            .build(dag);
+        worker.run().await.unwrap();
     }
 }

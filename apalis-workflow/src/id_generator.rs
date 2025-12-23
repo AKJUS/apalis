@@ -9,7 +9,7 @@ pub trait GenerateId {
 #[cfg(feature = "uuid")]
 impl GenerateId for uuid::Uuid {
     fn generate() -> Self {
-        uuid::Uuid::new_v4()
+        Self::new_v4()
     }
 }
 
@@ -23,5 +23,32 @@ impl GenerateId for ulid::Ulid {
 impl GenerateId for RandomId {
     fn generate() -> Self {
         Self::default()
+    }
+}
+
+#[cfg(feature = "rand")]
+impl GenerateId for u64 {
+    fn generate() -> Self {
+        rand::random::<Self>()
+    }
+}
+#[cfg(feature = "rand")]
+impl GenerateId for i64 {
+    fn generate() -> Self {
+        rand::random::<Self>()
+    }
+}
+
+#[cfg(feature = "rand")]
+impl GenerateId for u128 {
+    fn generate() -> Self {
+        rand::random::<Self>()
+    }
+}
+
+#[cfg(feature = "rand")]
+impl GenerateId for i128 {
+    fn generate() -> Self {
+        rand::random::<Self>()
     }
 }
