@@ -1,3 +1,7 @@
+/// OpenTelemetry integration for apalis
+#[cfg(feature = "opentelemetry")]
+#[cfg_attr(docsrs, doc(cfg(feature = "opentelemetry")))]
+pub mod opentelemetry;
 /// Prometheus middleware for telemetry
 #[cfg(feature = "prometheus")]
 #[cfg_attr(docsrs, doc(cfg(feature = "prometheus")))]
