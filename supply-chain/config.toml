@@ -280,6 +280,10 @@ criteria = "safe-to-deploy"
 version = "0.8.35"
 criteria = "safe-to-deploy"
 
+[[exemptions.enum_dispatch]]
+version = "0.3.13"
+criteria = "safe-to-deploy"
+
 [[exemptions.env_filter]]
 version = "0.1.4"
 criteria = "safe-to-deploy"
