@@ -4,6 +4,7 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+- **chore (api)!**: standardize execution context ([#751](https://github.com/apalis-dev/apalis/pull/751))
 - **chore**: bump opentelemetry_sdk ([#750](https://github.com/apalis-dev/apalis/pull/750))
 - **refactor**: improve file storage adding csv functionality ([#749](https://github.com/apalis-dev/apalis/pull/749))
 - **chore (api)!**: metadata as a key-value store ([#747](https://github.com/apalis-dev/apalis/pull/747))
@@ -48,6 +49,8 @@ All notable changes to this project are documented in this file.
 
 ### Breaking Changes
 
+- **api**: `Parts<Ctx, IdType>` becomes  to `ExecutionContext<Connection, IdType>` and merges Ctx into the task ([#751](https://github.com/apalis-dev/apalis/pull/751))
+- **api**: Changed `Task<Args, Ctx, Idtype>` to `Task<Args, Connection, IdType>` ([#751](https://github.com/apalis-dev/apalis/pull/751))
 - **crates**: Moved backend crates to respective repos ([#586](https://github.com/apalis-dev/apalis/pull/586))
 - **api**: `Backend` must be the second input in `WorkerBuilder` ([#586](https://github.com/apalis-dev/apalis/pull/586))
 
